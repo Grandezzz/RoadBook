@@ -68,4 +68,18 @@ body.complex-mode { min-height:0; height:100vh; height:100dvh; }
   .complex-mode .complex-date { margin-bottom:6px; }
   .complex-mode .complex-content { padding:12px; }
 }
-
+/* Keep narrow mobile layouts from being widened by intrinsic form/text sizes. */
+.form-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.field,.section,.item,.item-head,.item-name,.item-detail,.roadbook-title,.view-title,.complex-content,.topbar > * { min-width:0; }
+.field input,.field select,.field textarea { min-width:0; max-width:100%; }
+.item-name,.item-detail,.roadbook-title,.view-title,.complex-content h1,.complex-content p { overflow-wrap:anywhere; }
+.transfer-option { min-width:0; overflow-wrap:anywhere; }
+@media (max-width:400px) {
+  #app { padding-left:14px; padding-right:14px; }
+  .section { padding:15px; }
+  .topbar { gap:8px; }
+  .topbar h1 { font-size:24px; }
+  .form-grid { column-gap:8px; }
+  .complex-content { padding:14px; }
+  .complex-mode .mode-choice { min-width:46px; padding-left:7px; padding-right:7px; }
+}
