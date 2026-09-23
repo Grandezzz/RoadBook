@@ -1,0 +1,151 @@
+const KEY = 'roadbook-demo-v1';
+const types = { transport: '交通', activity: '游玩项目', meal: '吃饭' };
+const modes = { plane:'飞机', metro:'地铁', walk:'步行', drive:'开车', taxi:'打车', bike:'骑行', bus:'大巴', train:'火车' };
+const statusMeta = { pending:{label:'未进行'}, done:{label:'已完成'}, cancelled:{label:'已取消'} };
+let state = { roadbooks: [] }, screen = 'list', activeId = null, activeDate = null, editingItemId = null, showCalendar = false, viewMode = 'simple', activeItemId = null, pendingImages = [], pendingTransportPlans = [], selectedPlans = {};
+
+const $ = (s) => document.querySelector(s);
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const dateObj = (s) => new Date(`${s}T12:00:00`);
+const fmtDate = (s) => dateObj(s).toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'});
+const datesBetween = (start,end) => { const a=[]; for(let d=dateObj(start), last=dateObj(end);d<=last;d.setDate(d.getDate()+1)) a.push(localDate(d)); return a; };
+const esc = (v='') => String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
+function load(){ try { state = JSON.parse(localStorage.getItem(KEY)) || state; } catch { /* use empty state */ } }
+function book(){ return state.roadbooks.find(x=>x.id===activeId); }
+function showToast(t){ const x=$('#toast'); x.textContent=t; x.classList.add('show'); setTimeout(()=>x.classList.remove('show'),1800); }
+function transportPlans(i){ return i.plans?.length ? i.plans : [{mode:i.mode,origin:i.origin,destination:i.destination}]; }
+function displayPlan(i){ return transportPlans(i)[selectedPlans[i.id]||0] || transportPlans(i)[0]; }
+function planSwitchHtml(i){ const plans=transportPlans(i); if(i.type!=='transport'||plans.length<2)return ''; const active=selectedPlans[i.id]||0; return '<div class=\"plan-switch\">'+plans.map((_,index)=>'<button class=\"plan-choice '+(index===active?'active':'')+'\" data-plan-switch=\"'+i.id+'\" data-plan-index=\"'+index+'\">'+(index===0?'主方案':'备选 '+index)+'</button>').join('')+'</div>'; }
+function itemStatus(i){ return statusMeta[i.status] ? i.status : 'pending'; }
+function statusHtml(i){ const active=itemStatus(i); return '<div class=\"status-switch\">'+Object.entries(statusMeta).map(([key,value])=>'<button class=\"status-choice '+key+' '+(key===active?'active':'')+'\" data-status-item=\"'+i.id+'\" data-status=\"'+key+'\">'+value.label+'</button>').join('')+'</div>'; }
+function setItemStatus(id,status){ const found=Object.values(book().days).flat().find(item=>item.id===id); if(found){found.status=status;save();render();} }
+function itemName(i){ if(i.type==='transport'){const p=displayPlan(i);return `${modes[p.mode]||'交通'} · ${p.origin} → ${p.destination}`;} if(i.type==='activity') return i.name; return i.cuisine || '用餐'; }
+function itemDetail(i){ if(i.type==='transport'){const p=displayPlan(i);return `${p.origin} → ${p.destination}`;} if(i.type==='activity') return i.location; return [i.feature,i.location].filter(Boolean).join(' · '); }
+function allItems(b){ return datesBetween(b.startDate,b.endDate).flatMap(date => (b.days[date]||[]).map(item => Object.assign({},item,{date}))).sort((a,c)=>(a.date+a.startTime).localeCompare(c.date+c.startTime)); }
+function render(){ document.body.classList.toggle('complex-mode',screen==='view'&&viewMode==='complex'); if(screen==='list') renderList(); else if(screen==='edit') renderEdit(); else if(viewMode==='complex') renderComplexView(); else { renderView(); addModeSwitch(); addPlanSwitchListeners(); addStatusListeners(); addTransferListeners(); } }
+
+function renderList(){
+  const cards=state.roadbooks.map(b=>{const count=Object.values(b.days||{}).flat().length;return `<button class="roadbook" data-open="${b.id}"><h2 class="roadbook-title">${esc(b.title||'未命名路书')}</h2><div class="roadbook-meta">${fmtDate(b.startDate)} — ${fmtDate(b.endDate)}</div><div class="roadbook-bottom"><span>${count} 项行程</span><span>查看 ›</span></div></button>`}).join('');
+  $('#app').innerHTML=`<header class="topbar"><div><h1>我的路书</h1><p class="sub">把每一段旅程安排得刚刚好</p></div>${state.roadbooks.length?'<button class="icon-btn" id="export" title="导出数据">⇩</button>':''}</header>${state.roadbooks.length?`<section class="roadbook-list">${cards}</section><div class="new-row"><button class="add-big" id="new" aria-label="新建路书">+</button></div>`:`<section class="empty"><button class="add-big" id="new" aria-label="新建路书">+</button><p>新建第一份路书</p></section>`}`;
+  document.querySelectorAll('[data-open]').forEach(x=>x.onclick=()=>openBook(x.dataset.open)); $('#new').onclick=newBook; if($('#export')) $('#export').onclick=exportData;
+}
+function newBook(){ const today=localDate(), tomorrow=localDate(new Date(Date.now()+86400000)); const b={id:uid(),title:'',startDate:today,endDate:tomorrow,days:{},createdAt:new Date().toISOString()}; state.roadbooks.push(b); activeId=b.id; activeDate=today; editingItemId=null; screen='edit'; render(); }
+function openBook(id){ activeId=id; const b=book(), today=localDate(); activeDate=(today>=b.startDate&&today<=b.endDate)?today:b.startDate; screen='view'; showCalendar=false; render(); setTimeout(scrollCurrent,80); }
+function dayTabs(b){ return datesBetween(b.startDate,b.endDate).map(d=>{const dt=dateObj(d);const has=(b.days[d]||[]).length;return `<button class="day ${d===activeDate?'active':''}" data-day="${d}"><small>${['日','一','二','三','四','五','六'][dt.getDay()]}</small><b>${dt.getDate()}</b>${has?'<span class="dot"></span>':''}</button>`}).join(''); }
+function renderEdit(){ const b=book(); if(!b) return renderList(); const items=(b.days[activeDate]||[]).sort((a,c)=>a.startTime.localeCompare(c.startTime)); const editing=items.find(x=>x.id===editingItemId); $('#app').innerHTML=`<header class="topbar"><button class="icon-btn back" id="back">‹</button><div style="text-align:center"><strong>编辑路书</strong><div class="sub">${esc(b.title||'未命名路书')}</div></div><button class="icon-btn" id="save" title="保存">✓</button></header><section class="section"><h2>基本信息</h2><div class="form-grid"><div class="field full"><label>路书名称</label><input id="title" value="${esc(b.title)}" placeholder="例如：东京 5 日游" /></div><div class="field"><label>开始日期</label><input id="start" type="date" value="${b.startDate}" /></div><div class="field"><label>结束日期</label><input id="end" type="date" value="${b.endDate}" /></div></div></section><section class="section"><h2>选择日期</h2><div class="day-strip">${dayTabs(b)}</div><p class="hint">${fmtDate(activeDate)} · 已有 ${items.length} 项行程</p></section><section class="section"><h2>${editing?'编辑行程':'新增行程'}</h2>${itemForm(editing)}<div class="actions"><button class="btn secondary" id="clear-form">取消</button><button class="btn" id="add-item">${editing?'更新行程':'添加行程'}</button></div></section><section class="section"><h2>当天安排</h2><div class="item-list">${items.length?items.map(editItem).join(''):'<p class="hint">还没有行程，添加第一项吧。</p>'}</div></section>`;
+  renderFormFields();
+  pendingImages=(editing?.images||[]).slice(); renderImagePreviews();
+  pendingTransportPlans=editing?.type==='transport'?transportPlans(editing).slice(1):[]; renderTransportOptions();
+  $('#back').onclick=()=>{screen='view';render();}; $('#save').onclick=()=>{syncBook();save();screen='view';showToast('已保存到本机');render();}; $('#clear-form').onclick=()=>{editingItemId=null;render();}; $('#add-item').onclick=addItem;
+  ['#title','#start','#end'].forEach(s=>$(s).onchange=syncBook); document.querySelectorAll('[data-day]').forEach(x=>x.onclick=()=>{syncBook();activeDate=x.dataset.day;editingItemId=null;render();}); $('#type').onchange=()=>{renderFormFields();renderTransportOptions();}; document.querySelectorAll('[data-edit]').forEach(x=>x.onclick=()=>{editingItemId=x.dataset.edit;render();}); document.querySelectorAll('[data-delete]').forEach(x=>x.onclick=()=>deleteItem(x.dataset.delete)); $('#images').onchange=addImages; document.querySelectorAll('[data-remove-image]').forEach(x=>x.onclick=()=>{pendingImages.splice(Number(x.dataset.removeImage),1);renderImagePreviews();});
+}
+function itemForm(i={}){ const t=i.type||'transport'; return `<div class="form-grid"><div class="field"><label>开始时间</label><input id="startTime" type="time" value="${i.startTime||'09:00'}" /></div><div class="field"><label>结束时间</label><input id="endTime" type="time" value="${i.endTime||'10:00'}" /></div><div class="field full"><label>行程类型</label><select id="type">${Object.entries(types).map(([k,v])=>`<option value="${k}" ${k===t?'selected':''}>${v}</option>`).join('')}</select></div><div id="type-fields" class="field full"></div><div class="field full"><label>行程图片（最多 9 张）</label><input id="images" type="file" accept="image/*" multiple /><div id="image-previews" class="image-previews"></div></div></div>`; }
+function renderFormFields(){ const i=(book().days[activeDate]||[]).find(x=>x.id===editingItemId)||{}, type=$('#type').value; const content= type==='transport'?`<div class="form-grid"><div class="field full"><label>交通方式</label><select id="mode">${Object.entries(modes).map(([k,v])=>`<option value="${k}" ${i.mode===k?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>出发地点</label><input id="origin" value="${esc(i.origin||'')}" placeholder="例如：酒店" /></div><div class="field"><label>到达地点</label><input id="destination" value="${esc(i.destination||'')}" placeholder="例如：东京站" /></div></div>`:type==='activity'?`<div class="form-grid"><div class="field"><label>项目名称</label><input id="name" value="${esc(i.name||'')}" placeholder="例如：浅草寺" /></div><div class="field"><label>游玩地点</label><input id="location" value="${esc(i.location||'')}" placeholder="地点" /></div></div>`:`<div class="form-grid"><div class="field"><label>菜系</label><input id="cuisine" value="${esc(i.cuisine||'')}" placeholder="例如：寿司" /></div><div class="field"><label>特色</label><input id="feature" value="${esc(i.feature||'')}" placeholder="例如：预约制" /></div><div class="field full"><label>餐厅地点</label><input id="location" value="${esc(i.location||'')}" placeholder="餐厅或地址" /></div></div>`; $('#type-fields').innerHTML=content; }
+function renderImagePreviews(){ const box=$('#image-previews'); if(!box)return; box.innerHTML=''; pendingImages.forEach((src,index)=>{const wrap=document.createElement('div');wrap.className='image-thumb';const img=document.createElement('img');img.src=src;img.alt='行程图片 '+(index+1);const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.dataset.removeImage=index;remove.onclick=()=>{pendingImages.splice(index,1);renderImagePreviews();};wrap.append(img,remove);box.append(wrap);}); }
+function addImages(e){ const files=Array.from(e.target.files||[]).slice(0,9-pendingImages.length); if(!files.length)return; Promise.all(files.map(file=>new Promise(resolve=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.readAsDataURL(file);}))).then(images=>{pendingImages.push(...images);renderImagePreviews();e.target.value='';}); }
+function readAlternativePlans(){ const box=$('#alternative-plans'); if(!box)return pendingTransportPlans; return Array.from(box.querySelectorAll('[data-alt-plan]')).map(row=>({mode:row.querySelector('[data-alt-mode]').value,origin:row.querySelector('[data-alt-origin]').value.trim(),destination:row.querySelector('[data-alt-destination]').value.trim()})); }
+function renderTransportOptions(keepPlans=false){ const fields=$('#type-fields'); if(!fields||$('#type').value!=='transport')return; const old=$('#alternative-plans'); if(old){if(!keepPlans)pendingTransportPlans=readAlternativePlans();old.remove();} const wrap=document.createElement('div');wrap.id='alternative-plans';pendingTransportPlans.forEach((plan,index)=>{const row=document.createElement('div');row.className='alternative-plan';row.dataset.altPlan=index;row.innerHTML='<div class=\"alternative-head\"><strong>备选方案 '+(index+1)+'</strong><button type=\"button\" class=\"text-danger\" data-remove-plan=\"'+index+'\">移除</button></div><div class=\"form-grid\"><div class=\"field full\"><label>交通方式</label><select data-alt-mode>'+Object.entries(modes).map(([key,label])=>'<option value=\"'+key+'\" '+(plan.mode===key?'selected':'')+'>'+label+'</option>').join('')+'</select></div><div class=\"field\"><label>出发地点</label><input data-alt-origin value=\"'+esc(plan.origin||'')+'\" placeholder=\"出发地点\" /></div><div class=\"field\"><label>到达地点</label><input data-alt-destination value=\"'+esc(plan.destination||'')+'\" placeholder=\"到达地点\" /></div></div>';wrap.append(row);});const add=document.createElement('button');add.type='button';add.className='btn secondary small';add.id='add-plan';add.textContent='添加备选方案';add.disabled=pendingTransportPlans.length>=2;wrap.append(add);fields.append(wrap);$('#add-plan').onclick=()=>{pendingTransportPlans=readAlternativePlans();if(pendingTransportPlans.length<2){pendingTransportPlans.push({mode:'plane',origin:'',destination:''});renderTransportOptions(true);}};document.querySelectorAll('[data-remove-plan]').forEach(button=>button.onclick=()=>{pendingTransportPlans=readAlternativePlans();pendingTransportPlans.splice(Number(button.dataset.removePlan),1);renderTransportOptions(true);});}
+function syncBook(){ const b=book(); const s=$('#start').value,e=$('#end').value; if(s&&e&&e<s){showToast('结束日期不能早于开始日期'); return false;} b.title=$('#title').value.trim(); b.startDate=s;b.endDate=e; if(activeDate<s||activeDate>e) activeDate=s; return true; }
+function addItem(){ if(!syncBook()) return; const startTime=$('#startTime').value,endTime=$('#endTime').value,type=$('#type').value; if(!startTime||!endTime||endTime<=startTime) return showToast('结束时间需晚于开始时间'); let data={id:editingItemId||uid(),startTime,endTime,type,status:(book().days[activeDate]||[]).find(x=>x.id===editingItemId)?.status||'pending',images:pendingImages.slice()}; if(type==='transport'){const primary={mode:$('#mode').value,origin:$('#origin').value.trim(),destination:$('#destination').value.trim()};const alternatives=readAlternativePlans();const plans=[primary,...alternatives];if(plans.some(plan=>!plan.origin||!plan.destination))return showToast('请填写每个交通方案的出发与到达地点');data={...data,...primary,plans};} if(type==='activity'){data={...data,name:$('#name').value.trim(),location:$('#location').value.trim()};if(!data.name||!data.location)return showToast('请填写项目名称与地点');} if(type==='meal'){data={...data,cuisine:$('#cuisine').value.trim(),feature:$('#feature').value.trim(),location:$('#location').value.trim()};if(!data.location)return showToast('请填写餐厅地点');} const arr=book().days[activeDate]||[]; const n=arr.findIndex(x=>x.id===data.id); if(n>=0) arr[n]=data; else arr.push(data); book().days[activeDate]=arr; editingItemId=null; save();showToast(n>=0?'行程已更新':'行程已添加');render(); }
+function editItem(i){return `<article class="item"><div class="item-head"><span class="item-time">${i.startTime} — ${i.endTime}</span><span class="tag">${types[i.type]}</span></div><p class="item-name">${esc(itemName(i))}</p><div class="item-detail">${esc(itemDetail(i))}</div><div class="item-tools"><button class="btn secondary small" data-edit="${i.id}">编辑</button><button class="btn danger small" data-delete="${i.id}">删除</button></div></article>`;}
+function deleteItem(id){if(!confirm('确定删除这条行程吗？'))return;book().days[activeDate]=book().days[activeDate].filter(x=>x.id!==id);save();showToast('已删除');render();}
+function renderView(){const b=book();if(!b)return renderList();const items=(b.days[activeDate]||[]).sort((a,c)=>a.startTime.localeCompare(c.startTime));$('#app').innerHTML=`<header class="topbar"><button class="icon-btn back" id="back">‹</button><button class="icon-btn" id="edit" title="编辑路书">✎</button></header><section class="view-head"><h1 class="view-title">${esc(b.title||'未命名路书')}</h1><p class="view-dates">${fmtDate(b.startDate)} — ${fmtDate(b.endDate)}</p><button class="calendar-toggle" id="toggle-calendar">${showCalendar?'收起日历':'展开日历'}⌄</button>${showCalendar?calendar(b):''}</section><section class="day-strip">${dayTabs(b)}</section><section class="timeline" id="timeline">${items.length?items.map(timelineItem).join(''):`<div class="empty-day">这一天还没有安排<br><button class="btn secondary small" id="empty-edit">去添加行程</button></div>`}</section><div class="sticky-actions"><button class="btn" id="edit-bottom">编辑这份路书</button></div>`;$('#back').onclick=()=>{screen='list';render();}; $('#edit').onclick=$('#edit-bottom').onclick=()=>{screen='edit';editingItemId=null;render();}; if($('#empty-edit'))$('#empty-edit').onclick=()=>{screen='edit';render();};$('#toggle-calendar').onclick=()=>{showCalendar=!showCalendar;render();};document.querySelectorAll('[data-day]').forEach(x=>x.onclick=()=>{activeDate=x.dataset.day;render();setTimeout(scrollCurrent,50);});document.querySelectorAll('[data-cal]').forEach(x=>x.onclick=()=>{activeDate=x.dataset.cal;showCalendar=false;render();setTimeout(scrollCurrent,50);});addSwipe();}
+function calendar(b){const start=dateObj(b.startDate), end=dateObj(b.endDate), first=new Date(start.getFullYear(),start.getMonth(),1), last=new Date(end.getFullYear(),end.getMonth()+1,0);let html='<div class="calendar">'+['日','一','二','三','四','五','六'].map(x=>`<span class="cal-label">${x}</span>`).join('');for(let i=0;i<first.getDay();i++)html+='<span></span>';for(let d=new Date(first);d<=last;d.setDate(d.getDate()+1)){const key=localDate(d),inRange=key>=b.startDate&&key<=b.endDate;html+=`<button class="cal-day ${inRange?'in-range':''} ${key===activeDate?'selected':''} ${key===localDate()?'today':''}" ${inRange?`data-cal="${key}"`:'disabled'}>${d.getDate()}</button>`;}return html+'</div>';}
+function timelineItem(i){const now=new Date(),current=activeDate===localDate()&&now.toTimeString().slice(0,5)>=i.startTime&&now.toTimeString().slice(0,5)<i.endTime,status=itemStatus(i);return `<article class="timeline-card status-${status} ${current?'current':''}" ${current?'id="current-item"':''}><div class="item-head"><span class="item-time">${i.startTime} — ${i.endTime}</span><span class="tag">${types[i.type]}</span>${transferButtonHtml(i)}</div><p class="item-name">${esc(itemName(i))}</p><div class="item-detail">${esc(itemDetail(i))}</div>${planSwitchHtml(i)}${statusHtml(i)}</article>`;}
+function scrollCurrent(){const el=$('#current-item');if(el)el.scrollIntoView({block:'center',behavior:'smooth'});}
+function addSwipe(){let x=0;const el=$('.day-strip');el.addEventListener('touchstart',e=>x=e.touches[0].clientX,{passive:true});el.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x;if(Math.abs(dx)<55)return;const ds=datesBetween(book().startDate,book().endDate),n=ds.indexOf(activeDate)+(dx<0?1:-1);if(ds[n]){activeDate=ds[n];render();setTimeout(scrollCurrent,50);}}, {passive:true});}
+function exportData(){const out={schemaVersion:1,exportedAt:new Date().toISOString(),roadbooks:state.roadbooks};const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(out,null,2)],{type:'application/json'}));a.download=`roadbook-backup-${localDate().replaceAll('-','')}.json`;a.click();URL.revokeObjectURL(a.href);showToast('数据文件已导出');}
+function addModeSwitch(){ const bar=$('.topbar'); const edit=$('#edit'); if(!bar||!edit)return; const switcher=document.createElement('div'); switcher.className='mode-switch compact'; switcher.innerHTML='<button class="mode-choice active">极简</button><button class="mode-choice">复杂</button>'; switcher.querySelectorAll('button')[1].onclick=()=>{viewMode='complex';render();}; bar.insertBefore(switcher,edit); }
+function renderComplexView(){
+  const b=book(); if(!b)return renderList(); const items=allItems(b);
+  if(!items.length){ viewMode='simple'; render(); showToast('先添加一条行程'); return; }
+  let index=items.findIndex(x=>x.id===activeItemId); if(index<0){ index=items.findIndex(x=>x.date===activeDate); if(index<0)index=0; }
+  const item=items[index]; activeItemId=item.id; activeDate=item.date; const images=item.images||[];
+  const visual=images.length ? '<div class="complex-photo"><img src="'+esc(images[0])+'" alt="行程图片"><span class="photo-count">1 / '+images.length+'</span></div>' : '<div class="complex-placeholder '+item.type+'"><span>'+({transport:'✈',activity:'✦',meal:'⌁'}[item.type])+'</span></div>';
+  const dots=images.length>1 ? '<div class="photo-dots">'+images.map((_,n)=>'<button class="photo-dot '+(n===0?'active':'')+'" data-photo="'+n+'"></button>').join('')+'</div>' : '';
+  $('#app').innerHTML='<header class="topbar"><button class="icon-btn back" id="back">‹</button><div class="mode-switch compact"><button class="mode-choice" id="simple-mode">极简</button><button class="mode-choice active">复杂</button></div><button class="icon-btn" id="edit" title="编辑行程">✎</button></header><section class="complex-date">'+fmtDate(item.date)+' · '+(index+1)+' / '+items.length+'</section><article class="complex-card" id="complex-card">'+visual+dots+'<div class="complex-content"><div class="item-head"><span class="item-time">'+item.startTime+' — '+item.endTime+'</span><span class="tag">'+types[item.type]+'</span></div><h1>'+esc(itemName(item))+'</h1><p>'+esc(itemDetail(item))+'</p></div></article><div class="card-controls"><button class="card-nav" id="prev-card" '+(index===0?'disabled':'')+'>‹ 上一程</button><button class="card-nav" id="next-card" '+(index===items.length-1?'disabled':'')+'>下一程 ›</button></div><div class="sticky-actions"><button class="btn" id="edit-bottom">编辑这条行程</button></div>';
+  $('.complex-content .item-head').insertAdjacentHTML('beforeend',transferButtonHtml(item));
+  $('#complex-card').classList.add('status-'+itemStatus(item)); $('.complex-content').insertAdjacentHTML('beforeend',statusHtml(item)); if(item.type==='transport')$('.complex-content').insertAdjacentHTML('beforeend',planSwitchHtml(item)); addPlanSwitchListeners(); addStatusListeners(); addTransferListeners();
+  $('#back').onclick=()=>{screen='list';render();}; $('#simple-mode').onclick=()=>{viewMode='simple';render();setTimeout(scrollCurrent,50);};
+  const edit=()=>{viewMode='simple';screen='edit';editingItemId=item.id;activeDate=item.date;render();}; $('#edit').onclick=edit; $('#edit-bottom').onclick=edit;
+  const move=offset=>{const next=items[index+offset];if(!next)return showToast(offset>0?'已经是最后一程':'已经是第一程');activeItemId=next.id;activeDate=next.date;render();}; const moveDate=offset=>{const days=datesBetween(b.startDate,b.endDate),nextDate=days[days.indexOf(activeDate)+offset];if(!nextDate)return showToast(offset>0?'已经是最后一天':'已经是第一天');const next=items.find(x=>x.date===nextDate);if(!next)return showToast('当天没有行程');activeDate=nextDate;activeItemId=next.id;render();}; $('#prev-card').onclick=()=>move(-1); $('#next-card').onclick=()=>move(1); bindCardSwipe(move,moveDate); $('.card-controls').remove(); $('.sticky-actions').remove();
+  let photo=0; document.querySelectorAll('[data-photo]').forEach(dot=>dot.onclick=()=>{photo=Number(dot.dataset.photo); const img=$('.complex-photo img'); img.src=images[photo]; $('.photo-count').textContent=(photo+1)+' / '+images.length; document.querySelectorAll('[data-photo]').forEach(x=>x.classList.toggle('active',Number(x.dataset.photo)===photo));});
+  const photoBox=$('.complex-photo'); if(photoBox&&images.length>1){let x=0;photoBox.addEventListener('touchstart',e=>x=e.touches[0].clientX,{passive:true});photoBox.addEventListener('touchend',e=>{e.stopPropagation();const dx=e.changedTouches[0].clientX-x;if(Math.abs(dx)<35)return;photo=(photo+(dx<0?1:-1)+images.length)%images.length;photoBox.querySelector('img').src=images[photo];photoBox.querySelector('.photo-count').textContent=(photo+1)+' / '+images.length;document.querySelectorAll('[data-photo]').forEach(z=>z.classList.toggle('active',Number(z.dataset.photo)===photo));},{passive:true});}
+}
+function addPlanSwitchListeners(){document.querySelectorAll('[data-plan-switch]').forEach(button=>button.onclick=()=>{selectedPlans[button.dataset.planSwitch]=Number(button.dataset.planIndex);render();});}
+function addStatusListeners(){document.querySelectorAll('[data-status-item]').forEach(button=>button.onclick=()=>setItemStatus(button.dataset.statusItem,button.dataset.status));}
+function bindCardSwipe(move,moveDate){let x=0,y=0;const card=$('#complex-card');card.addEventListener('touchstart',e=>{x=e.touches[0].clientX;y=e.touches[0].clientY;},{passive:true});card.addEventListener('touchend',e=>{const content=e.target.closest('.complex-content');if(content&&content.scrollHeight>content.clientHeight+1)return;if(e.target.closest('button'))return;const dx=e.changedTouches[0].clientX-x,dy=e.changedTouches[0].clientY-y;if(Math.max(Math.abs(dx),Math.abs(dy))<55)return;if(Math.abs(dx)>Math.abs(dy))moveDate(dx<0?1:-1);else move(dy<0?1:-1);},{passive:true});}
+function transferButtonHtml(item){
+  return `<button type="button" class="transfer-trigger" data-transfer-item="${esc(item.id)}" aria-haspopup="dialog">移动/复制</button>`;
+}
+function addTransferListeners(){
+  document.querySelectorAll('[data-transfer-item]').forEach(button=>button.onclick=()=>openTransferDialog(button.dataset.transferItem));
+}
+function openTransferDialog(id){
+  const b=book();
+  const sourceDate=Object.keys(b.days).find(date=>b.days[date].some(item=>item.id===id));
+  const item=b.days[sourceDate]?.find(item=>item.id===id);
+  if(!item)return;
+  const dialog=document.createElement('dialog');
+  dialog.className='transfer-dialog';
+  dialog.setAttribute('aria-labelledby','transfer-title');
+  dialog.innerHTML=`<h2 id="transfer-title">移动/复制行程</h2>
+    <p class="transfer-summary">${esc(itemName(item))}</p>
+    <p class="transfer-source">当前：${fmtDate(sourceDate)} · ${item.startTime} — ${item.endTime}</p>
+    <div class="transfer-options">
+      <button type="button" class="transfer-option" data-operation="move" aria-pressed="false">移动到某一天<span>从原日期移走</span></button>
+      <button type="button" class="transfer-option" data-operation="copy" aria-pressed="false">复制到某一天<span>保留原行程，新增一份</span></button>
+    </div>
+    <form id="transfer-form" hidden>
+      <div class="field"><label for="transfer-date">目标日期</label><select id="transfer-date" required></select></div>
+      <p class="transfer-note">保留时间和行程内容，按开始时间插入当天安排。</p>
+      <p id="transfer-error" role="alert"></p>
+      <button class="btn transfer-confirm" type="submit">确认</button>
+    </form>
+    <button class="btn secondary transfer-cancel" type="button">取消</button>`;
+  document.body.append(dialog);
+  let operation=null;
+  const form=dialog.querySelector('form'),select=dialog.querySelector('select'),error=dialog.querySelector('#transfer-error');
+  dialog.querySelectorAll('[data-operation]').forEach(button=>button.onclick=()=>{
+    operation=button.dataset.operation;
+    dialog.querySelectorAll('[data-operation]').forEach(option=>option.setAttribute('aria-pressed',String(option===button)));
+    const previousDate=select.value;
+    const dates=datesBetween(b.startDate,b.endDate).filter(date=>operation==='copy'||date!==sourceDate);
+    select.innerHTML=dates.map(date=>`<option value="${date}">${fmtDate(date)}${date===sourceDate?'（当天）':''}</option>`).join('');
+    select.value=dates.includes(previousDate)?previousDate:(dates.find(date=>date>sourceDate)||dates[0]||'');
+    form.hidden=false;
+    const submit=form.querySelector('button');
+    submit.textContent=operation==='move'?'确认移动':'确认复制';
+    submit.disabled=!dates.length;
+    error.textContent=dates.length?'':'这份路书只有一天，无法移动到其他日期；可选择复制。';
+  });
+  form.onsubmit=event=>{
+    event.preventDefault();
+    const targetDate=select.value;
+    if(!['move','copy'].includes(operation)||!datesBetween(b.startDate,b.endDate).includes(targetDate)){
+      error.textContent='请选择路书日期范围内的目标日期。';return;
+    }
+    if(operation==='move'&&targetDate===sourceDate){error.textContent='请选择其他日期。';return;}
+    const inserted=JSON.parse(JSON.stringify(item));
+    if(operation==='copy')inserted.id=uid();
+    const previousDays=b.days;
+    const nextDays={...previousDays};
+    if(operation==='move')nextDays[sourceDate]=previousDays[sourceDate].filter(entry=>entry.id!==id);
+    nextDays[targetDate]=[...(nextDays[targetDate]||[]),inserted].sort((a,c)=>a.startTime.localeCompare(c.startTime));
+    b.days=nextDays;
+    try {save();} catch {
+      b.days=previousDays;
+      error.textContent='保存失败，原行程未改动。请检查浏览器存储空间后重试。';return;
+    }
+    activeDate=targetDate;activeItemId=inserted.id;showCalendar=false;
+    dialog.close();render();
+    showToast(`已${operation==='move'?'移动':'复制'}到${fmtDate(targetDate)}`);
+  };
+  dialog.querySelector('.transfer-cancel').onclick=()=>dialog.close();
+  dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+  dialog.showModal();
+}
+load();render();
+
