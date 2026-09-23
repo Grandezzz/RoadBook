@@ -1,4 +1,10 @@
 const KEY = 'roadbook-demo-v1';
+const LOCAL_BACKUP_KEY = 'roadbook-pre-cloud-backup-v1';
+const cloudConfig = window.ROADBOOK_SUPABASE || {};
+const supabaseReady = Boolean(window.supabase && cloudConfig.url && cloudConfig.anonKey);
+const cloud = supabaseReady ? window.supabase.createClient(cloudConfig.url, cloudConfig.anonKey) : null;
+let cloudUser = null, cloudTimer = null, authBusy = false, accessNotice = '';
+let inviteNeedsPassword = new URLSearchParams(window.location.hash.slice(1)).get('type') === 'invite';
 const types = { transport: '交通', activity: '游玩项目', meal: '吃饭' };
 const modes = { plane:'飞机', metro:'地铁', walk:'步行', drive:'开车', taxi:'打车', bike:'骑行', bus:'大巴', train:'火车' };
 const statusMeta = { pending:{label:'未进行'}, done:{label:'已完成'}, cancelled:{label:'已取消'} };
@@ -11,8 +17,15 @@ const dateObj = (s) => new Date(`${s}T12:00:00`);
 const fmtDate = (s) => dateObj(s).toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'short'});
 const datesBetween = (start,end) => { const a=[]; for(let d=dateObj(start), last=dateObj(end);d<=last;d.setDate(d.getDate()+1)) a.push(localDate(d)); return a; };
 const esc = (v='') => String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
+function save(){ localStorage.setItem(KEY, JSON.stringify(state)); if(cloudUser) scheduleCloudSave(); }
 function load(){ try { state = JSON.parse(localStorage.getItem(KEY)) || state; } catch { /* use empty state */ } }
+function scheduleCloudSave(){ clearTimeout(cloudTimer); cloudTimer=setTimeout(async()=>{ if(!cloudUser)return; const {error}=await cloud.from('roadbook_data').upsert({user_id:cloudUser.id,payload:state,updated_at:new Date().toISOString()}); if(error)showToast('云端保存失败：'+error.message); },700); }
+async function connectCloud(){ if(!cloud)return; const {data}=await cloud.auth.getSession(); if(data.session) await activateCloudUser(data.session.user); cloud.auth.onAuthStateChange((event,session)=>{ if(event==='SIGNED_OUT'||!session){cloudUser=null;render();} }); }
+async function activateCloudUser(user){ const email=(user.email||'').trim().toLowerCase();const {data:approval,error:approvalError}=await cloud.from('roadbook_access').select('email').eq('email',email).maybeSingle();if(approvalError||!approval){cloudUser=null;accessNotice=approvalError?'无法确认账号授权，请联系网站所有者。':'此账号尚未获准访问，请联系网站所有者申请邀请。';render();return;}accessNotice='';cloudUser=user;const {data,error}=await cloud.from('roadbook_data').select('payload').eq('user_id',user.id).maybeSingle();if(error){cloudUser=null;accessNotice='读取云端数据失败，请联系网站所有者。';render();return;}if(data?.payload){try{localStorage.setItem(LOCAL_BACKUP_KEY,localStorage.getItem(KEY)||'');}catch{}state=data.payload;localStorage.setItem(KEY,JSON.stringify(state));}else if(state.roadbooks.length){scheduleCloudSave();}render(); }
+async function signIn(){ if(!cloud||authBusy)return;const email=$('#cloud-email').value.trim(),password=$('#cloud-password').value,message=$('#cloud-message');if(!email||!password){message.textContent='请输入邮箱和密码。';return;}authBusy=true;message.textContent='正在登录…';const {data,error}=await cloud.auth.signInWithPassword({email,password});authBusy=false;if(error){message.textContent='登录失败，请检查账号密码或联系网站所有者。';return;}message.textContent='登录成功，正在核对访问权限…';if(data.session)await activateCloudUser(data.session.user); }
+async function setInvitePassword(){const password=$('#invite-password').value,confirmPassword=$('#invite-password-confirm').value,message=$('#invite-message');if(password.length<6){message.textContent='密码至少需要 6 位。';return;}if(password!==confirmPassword){message.textContent='两次输入的密码不一致。';return;}message.textContent='正在设置密码…';const {error}=await cloud.auth.updateUser({password});if(error){message.textContent='设置失败，请重试或重新索取邀请链接。';return;}inviteNeedsPassword=false;window.history.replaceState({},document.title,window.location.pathname+window.location.search);render();showToast('账号设置完成');}
+function renderInviteSetup(){ $('#app').innerHTML=`<section class="access-gate"><h1>完成账号设置</h1><p>邀请已验证。请设置登录密码，之后可在其他设备使用此邮箱登录。</p><div class="field"><label for="invite-password">设置密码</label><input id="invite-password" type="password" autocomplete="new-password" minlength="6" placeholder="至少 6 位"></div><div class="field"><label for="invite-password-confirm">再次输入密码</label><input id="invite-password-confirm" type="password" autocomplete="new-password" minlength="6" placeholder="确认密码"></div><p id="invite-message" class="hint" aria-live="polite"></p><button class="btn" id="invite-save-password">保存密码并进入</button></section>`;$('#invite-save-password').onclick=setInvitePassword; }
+async function signOutCloud(){if(cloud)await cloud.auth.signOut();cloudUser=null;inviteNeedsPassword=false;history.replaceState({},document.title,window.location.pathname+window.location.search);render();}
 function book(){ return state.roadbooks.find(x=>x.id===activeId); }
 function showToast(t){ const x=$('#toast'); x.textContent=t; x.classList.add('show'); setTimeout(()=>x.classList.remove('show'),1800); }
 function transportPlans(i){ return i.plans?.length ? i.plans : [{mode:i.mode,origin:i.origin,destination:i.destination}]; }
@@ -24,12 +37,15 @@ function setItemStatus(id,status){ const found=Object.values(book().days).flat()
 function itemName(i){ if(i.type==='transport'){const p=displayPlan(i);return `${modes[p.mode]||'交通'} · ${p.origin} → ${p.destination}`;} if(i.type==='activity') return i.name; return i.cuisine || '用餐'; }
 function itemDetail(i){ if(i.type==='transport'){const p=displayPlan(i);return `${p.origin} → ${p.destination}`;} if(i.type==='activity') return i.location; return [i.feature,i.location].filter(Boolean).join(' · '); }
 function allItems(b){ return datesBetween(b.startDate,b.endDate).flatMap(date => (b.days[date]||[]).map(item => Object.assign({},item,{date}))).sort((a,c)=>(a.date+a.startTime).localeCompare(c.date+c.startTime)); }
-function render(){ document.body.classList.toggle('complex-mode',screen==='view'&&viewMode==='complex'); if(screen==='list') renderList(); else if(screen==='edit') renderEdit(); else if(viewMode==='complex') renderComplexView(); else { renderView(); addModeSwitch(); addPlanSwitchListeners(); addStatusListeners(); addTransferListeners(); } }
+function render(){ document.body.classList.toggle('complex-mode',screen==='view'&&viewMode==='complex');if(!cloudUser)return renderAccessGate();if(inviteNeedsPassword)return renderInviteSetup();if(screen==='list') renderList(); else if(screen==='edit') renderEdit(); else if(viewMode==='complex') renderComplexView(); else { renderView(); addModeSwitch(); addPlanSwitchListeners(); addStatusListeners(); addTransferListeners(); } }
+
+function renderAccessGate(){const content=!supabaseReady?'<h1>网站暂未开放</h1><p>访问控制服务尚未配置，请稍后联系网站所有者。</p>':`<h1>路书访问</h1><p>此网站仅对获邀账号开放。请使用网站所有者批准的邮箱登录；如需访问，请联系网站所有者申请邀请。</p>${accessNotice?`<p class="access-notice" role="alert">${esc(accessNotice)}</p>`:''}<div class="field"><label for="cloud-email">获邀邮箱</label><input id="cloud-email" type="email" autocomplete="username" placeholder="name@example.com"></div><div class="field"><label for="cloud-password">密码</label><input id="cloud-password" type="password" autocomplete="current-password" placeholder="账号密码"></div><p id="cloud-message" class="hint" aria-live="polite"></p><button class="btn" id="cloud-signin">登录并验证权限</button>`;$('#app').innerHTML=`<section class="access-gate">${content}${cloudUser||accessNotice?'<button class="btn secondary" id="cloud-signout">切换账号</button>':''}</section>`;if($('#cloud-signin'))$('#cloud-signin').onclick=signIn;if($('#cloud-signout'))$('#cloud-signout').onclick=signOutCloud;}
 
 function renderList(){
   const cards=state.roadbooks.map(b=>{const count=Object.values(b.days||{}).flat().length;return `<button class="roadbook" data-open="${b.id}"><h2 class="roadbook-title">${esc(b.title||'未命名路书')}</h2><div class="roadbook-meta">${fmtDate(b.startDate)} — ${fmtDate(b.endDate)}</div><div class="roadbook-bottom"><span>${count} 项行程</span><span>查看 ›</span></div></button>`}).join('');
-  $('#app').innerHTML=`<header class="topbar"><div><h1>我的路书</h1><p class="sub">把每一段旅程安排得刚刚好</p></div>${state.roadbooks.length?'<button class="icon-btn" id="export" title="导出数据">⇩</button>':''}</header>${state.roadbooks.length?`<section class="roadbook-list">${cards}</section><div class="new-row"><button class="add-big" id="new" aria-label="新建路书">+</button></div>`:`<section class="empty"><button class="add-big" id="new" aria-label="新建路书">+</button><p>新建第一份路书</p></section>`}`;
-  document.querySelectorAll('[data-open]').forEach(x=>x.onclick=()=>openBook(x.dataset.open)); $('#new').onclick=newBook; if($('#export')) $('#export').onclick=exportData;
+  const cloudPanel=`<section class="section cloud-panel"><strong>已通过账号验证</strong><p class="hint">${esc(cloudUser.email||'获批账号')} · 路书已与云端同步</p><button class="btn secondary small" id="cloud-signout">退出登录</button></section>`;
+  $('#app').innerHTML=`<header class="topbar"><div><h1>我的路书</h1><p class="sub">把每一段旅程安排得刚刚好</p></div>${state.roadbooks.length?'<button class="icon-btn" id="export" title="导出数据">⇩</button>':''}</header>${cloudPanel}${state.roadbooks.length?`<section class="roadbook-list">${cards}</section><div class="new-row"><button class="add-big" id="new" aria-label="新建路书">+</button></div>`:`<section class="empty"><button class="add-big" id="new" aria-label="新建路书">+</button><p>新建第一份路书</p></section>`}`;
+  document.querySelectorAll('[data-open]').forEach(x=>x.onclick=()=>openBook(x.dataset.open)); $('#new').onclick=newBook; if($('#export')) $('#export').onclick=exportData; if($('#cloud-signout'))$('#cloud-signout').onclick=signOutCloud;
 }
 function newBook(){ const today=localDate(), tomorrow=localDate(new Date(Date.now()+86400000)); const b={id:uid(),title:'',startDate:today,endDate:tomorrow,days:{},createdAt:new Date().toISOString()}; state.roadbooks.push(b); activeId=b.id; activeDate=today; editingItemId=null; screen='edit'; render(); }
 function openBook(id){ activeId=id; const b=book(), today=localDate(); activeDate=(today>=b.startDate&&today<=b.endDate)?today:b.startDate; screen='view'; showCalendar=false; render(); setTimeout(scrollCurrent,80); }
@@ -147,5 +163,5 @@ function openTransferDialog(id){
   dialog.addEventListener('close',()=>dialog.remove(),{once:true});
   dialog.showModal();
 }
-load();render();
+load();render();void connectCloud();
 
