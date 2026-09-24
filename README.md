@@ -5,8 +5,8 @@
 ## 需求与协作
 
 - [需求记录](REQUIREMENTS.md)：后续新增需求、变更及完成状态统一记录在此。
-- [需求记录技能](../skills/roadbook-requirements/SKILL.md)：规定接收需求时同步更新 Markdown。
-- [项目协作入口](../AGENTS.md)：后续处理本项目时先读取上述技能和需求记录。
+- [需求记录技能](skills/roadbook-requirements/SKILL.md)：规定接收需求时同步更新 Markdown。
+- [项目协作入口](AGENTS.md)：后续处理本项目时先读取上述技能和需求记录。
 
 ## 本地运行
 
