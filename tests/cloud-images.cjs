@@ -42,6 +42,13 @@ vm.runInContext('cloudUser = {id:"user-1"}; render = () => {}; showToast = () =>
   assert.equal(uploads.length, 1);
   assert.equal(local.get('roadbook-demo-v1'), 'old image cache');
 
+  context.createImageBitmap = async () => ({width: 3000, height: 2000, close() {}});
+  context.document.createElement = () => ({getContext: () => ({drawImage() {}}), toBlob: callback => callback(new Blob(['small'], {type: 'image/webp'}))});
+  const compressedPath = await vm.runInContext('uploadImage', context)(new Blob([Buffer.alloc(500_000)], {type: 'image/jpeg'}));
+  assert.equal(compressedPath, 'user-1/image-id.webp');
+  assert.equal(uploads.at(-1).type, 'image/webp');
+  context.createImageBitmap = undefined;
+
   const legacy = 'data:image/png;base64,aGVsbG8=';
   vm.runInContext('state = {roadbooks:[{days:{"2026-09-24":[{id:"a",images:["' + legacy + '"]}]}}]}', context);
   await vm.runInContext('migrateEmbeddedImages', context)();
