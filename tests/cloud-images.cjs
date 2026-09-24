@@ -17,7 +17,8 @@ const cloud = {
     assert.equal(bucket, 'roadbook-images');
     return {
       async upload(key, file) { uploads.push({key, type: file.type}); return {error: uploadError}; },
-      async createSignedUrl(key) { signed.push(key); return {data: {signedUrl: `https://example.test/${key}`}, error: null}; }
+      async createSignedUrl(key) { signed.push(key); return {data: {signedUrl: `https://example.test/${key}`}, error: null}; },
+      async createSignedUrls(keys) { return {data: keys.map(key => ({path: key, signedUrl: `https://example.test/${key}`})), error: null}; }
     };
   }}
 };
@@ -56,6 +57,13 @@ vm.runInContext('cloudUser = {id:"user-1"}; render = () => {}; showToast = () =>
   await assert.rejects(vm.runInContext('migrateEmbeddedImages', context)(), /bucket missing/);
   assert.equal(writes.length, 1, 'a failed upload must not replace cloud data');
   assert.equal(vm.runInContext('state.roadbooks[0].days["2026-09-24"][0].images[0]', context), legacy);
-  console.log('cloud image upload, migration, failure rollback, and signed URL cache passed');
+  uploadError = null;
+  context.fetch = async () => ({ok: true, blob: async () => new Blob(['large original'], {type: 'image/jpeg'})});
+  vm.runInContext('resizeImage = async () => new Blob(["small"], {type:"image/webp"}); save = () => {}', context);
+  vm.runInContext('state = {roadbooks:[{days:{"2026-09-24":[{id:"c",images:["user-1/old.jpg"]},{id:"d",images:["user-1/old.jpg"]}]}}]}', context);
+  await vm.runInContext('createCloudPreview', context)('user-1/old.jpg');
+  assert.equal(vm.runInContext('state.roadbooks[0].days["2026-09-24"][1].imagePreviews["user-1/old.jpg"]', context), 'user-1/old.preview.webp');
+  assert.equal(uploads.at(-1).key, 'user-1/old.preview.webp');
+  console.log('cloud image upload, migration, preview generation, failure rollback, and signed URL cache passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
